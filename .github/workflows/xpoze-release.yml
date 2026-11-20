@@ -1,13 +1,13 @@
 name: "Xpoze: Release binaries"
 
-# Builds the Pyrefly executable of Xpoze's fork for each platform the Xpoze CI
-# step's bundle ships, and publishes them as a GitHub release of the pushed tag,
-# with their SHA-256 checksums in SHA256SUMS. A manual run builds and tests
-# without publishing.
+# Builds the Pyrefly executable of Xpoze's fork for each Linux platform, the
+# ones the Xpoze CI step's bundle ships for now, and publishes them as a GitHub
+# release of the pushed tag, with their SHA-256 checksums in SHA256SUMS, which
+# the Xpoze CI step's Python build pins. A manual run builds and tests without
+# publishing.
 #
-# The builds follow ecosystems/python/build_pyrefly.sh in the Xpoze CI step:
-# `cargo build --release --locked -p pyrefly` on a runner of the platform, and
-# on Linux for musl, statically linked, so one executable runs on every Linux
+# Each build is `cargo build --release --locked -p pyrefly` on a runner of the
+# platform, for musl, statically linked, so one executable runs on every Linux
 # image, glibc or musl. The executable holds musl, under its MIT licence.
 # Unlike upstream's release wheels, the executables are not optimized with PGO
 # or BOLT.
@@ -71,35 +71,17 @@ jobs:
           - platform: linux-arm64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
-          - platform: darwin-x64
-            os: macos-15-intel
-            target: x86_64-apple-darwin
-          - platform: darwin-arm64
-            os: macos-15
-            target: aarch64-apple-darwin
-          - platform: win32-x64
-            os: windows-latest
-            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Set Windows cargo home
-        # Some dependencies cloned by Cargo have long paths, which fail the
-        # build under the default cargo home on Windows, as upstream notes.
-        if: ${{ runner.os == 'Windows' }}
-        run: echo "CARGO_HOME=C:\\cargo" >> $env:GITHUB_ENV
       # jemalloc needs the page size of the machines the executable runs on, or
       # it segfaults (https://github.com/pyrefly-org/pyrefly/issues/380): up to
-      # 64 KiB on ARM64 Linux, 16 KiB on ARM64 macOS, as upstream sets them.
+      # 64 KiB on ARM64 Linux, as upstream sets it.
       - name: Set jemalloc page size for ARM64 Linux
         if: ${{ matrix.platform == 'linux-arm64' }}
         run: echo "JEMALLOC_SYS_WITH_LG_PAGE=16" >> "$GITHUB_ENV"
-      - name: Set jemalloc page size for ARM64 macOS
-        if: ${{ matrix.platform == 'darwin-arm64' }}
-        run: echo "JEMALLOC_SYS_WITH_LG_PAGE=14" >> "$GITHUB_ENV"
       - name: Set up the static musl build
-        if: ${{ runner.os == 'Linux' }}
         env:
           TARGET: ${{ matrix.target }}
         run: |
@@ -127,10 +109,9 @@ jobs:
           TARGET: ${{ matrix.target }}
           PLATFORM: ${{ matrix.platform }}
         run: |
-          case $PLATFORM in win32-*) suffix=.exe ;; *) suffix= ;; esac
           mkdir dist
-          cp "target/$TARGET/release/pyrefly$suffix" "dist/pyrefly-$PLATFORM$suffix"
-          "dist/pyrefly-$PLATFORM$suffix" --version
+          cp "target/$TARGET/release/pyrefly" "dist/pyrefly-$PLATFORM"
+          "dist/pyrefly-$PLATFORM" --version
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pyrefly-${{ matrix.platform }}
@@ -162,4 +143,4 @@ jobs:
         run: |
           gh release create "$TAG" pyrefly-* SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" \
-            --notes "Pyrefly of Xpoze's fork at $TAG, built for each platform of the Xpoze CI step's bundle. SHA256SUMS holds each executable's SHA-256."
+            --notes "Pyrefly of Xpoze's fork at $TAG, built for each Linux platform of the Xpoze CI step's bundle. SHA256SUMS holds each executable's SHA-256."
