@@ -69,10 +69,20 @@ struct ScalarTypeProperties {
   isEnum  @3 :Bool;
 }
 
+enum AnyStyle {
+  none          @0;
+  explicit      @1;
+  implicit      @2;
+  error         @3;
+  missingImport @4;
+}
+
 struct PysaType {
   string               @0 :Text;
   scalarTypeProperties @1 :ScalarTypeProperties;
   classNames           @2 :ClassNamesFromType;
+  anyStyle             @3 :AnyStyle;
+  module               @4 :Text;  # null if absent
 }
 
 struct ScopeParent {
@@ -292,6 +302,7 @@ struct AttributeAccessCallees {
   propertyGetters @2 :List(PysaCallTarget);
   globalTargets   @3 :List(GlobalVariableRef);
   isAttribute     @4 :Bool;
+  getattrCallees  @5 :GetattrCallees;
 }
 
 struct IdentifierCallees {
@@ -306,6 +317,11 @@ struct DefineCallees {
 
 struct FormatStringArtificialCallees {
   targets @0 :List(PysaCallTarget);
+}
+
+struct GetattrCallees {
+  targets    @0 :List(PysaCallTarget);
+  unresolved @1 :Unresolved;
 }
 
 struct FormatStringStringifyCallees {

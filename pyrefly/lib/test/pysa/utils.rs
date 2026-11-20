@@ -30,8 +30,20 @@ use crate::state::state::Transaction;
 use crate::test::util::TestEnv;
 
 pub fn create_state(module_name: &str, python_code: &str) -> State {
+    create_state_with_files(module_name, python_code, &[])
+}
+
+/// Like `create_state`, with other modules given as `(module name, path, code)`.
+pub fn create_state_with_files(
+    module_name: &str,
+    python_code: &str,
+    files: &[(&str, &str, &str)],
+) -> State {
     let mut test_env = TestEnv::new();
     test_env.add(module_name, python_code);
+    for (name, path, code) in files {
+        test_env.add_with_path(name, path, code);
+    }
     let (state, _) = test_env
         .with_default_require_level(Require::Everything)
         .to_state();

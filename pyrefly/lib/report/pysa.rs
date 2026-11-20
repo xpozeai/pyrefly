@@ -85,6 +85,7 @@ use crate::report::pysa::module_index::PysaModuleIndex;
 use crate::report::pysa::override_graph::ModuleReversedOverrideGraph;
 use crate::report::pysa::override_graph::create_reversed_override_graph_for_module;
 use crate::report::pysa::step_logger::StepLogger;
+use crate::report::pysa::type_of_expression::ExportedExpressions;
 use crate::report::pysa::type_of_expression::export_type_of_expressions;
 use crate::report::pysa::types::PysaType;
 use crate::state::state::Transaction;
@@ -221,6 +222,7 @@ pub struct PysaReporter {
     pub type_of_expressions_directory: PathBuf,
     pub call_graphs_directory: PathBuf,
     pub format: PysaFormat,
+    pub exported_expressions: ExportedExpressions,
 }
 
 impl PysaReporter {
@@ -229,6 +231,7 @@ impl PysaReporter {
         pysa_directory: &Path,
         handles: &[Handle],
         format: PysaFormat,
+        exported_expressions: ExportedExpressions,
     ) -> anyhow::Result<Box<Self>> {
         tracing::debug!("Writing pysa results to `{}`", pysa_directory.display());
 
@@ -249,6 +252,7 @@ impl PysaReporter {
             type_of_expressions_directory,
             call_graphs_directory,
             format,
+            exported_expressions,
         }))
     }
 
@@ -307,7 +311,8 @@ impl PysaReporter {
                     .expect("Failed to write definitions file"),
             }
 
-            let module_type_of_expressions = export_module_type_of_expressions(&context);
+            let module_type_of_expressions =
+                export_module_type_of_expressions(&context, self.exported_expressions);
             let writer = BufWriter::new(
                 File::create(self.type_of_expressions_directory.join(info_filename))
                     .expect("Failed to create type_of_expressions file"),
@@ -381,8 +386,11 @@ pub fn export_module_definitions(
     }
 }
 
-pub fn export_module_type_of_expressions(context: &ModuleContext) -> PysaModuleTypeOfExpressions {
-    let functions = export_type_of_expressions(context);
+pub fn export_module_type_of_expressions(
+    context: &ModuleContext,
+    exported_expressions: ExportedExpressions,
+) -> PysaModuleTypeOfExpressions {
+    let functions = export_type_of_expressions(context, exported_expressions);
     PysaModuleTypeOfExpressions {
         format_version: 1,
         module_id: context.answers_context.module_id,

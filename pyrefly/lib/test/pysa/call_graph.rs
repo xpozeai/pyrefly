@@ -23,6 +23,7 @@ use crate::report::pysa::call_graph::ExpressionIdentifier;
 use crate::report::pysa::call_graph::FormatStringArtificialCallees;
 use crate::report::pysa::call_graph::FormatStringStringifyCallees;
 use crate::report::pysa::call_graph::FunctionTrait;
+use crate::report::pysa::call_graph::GetattrCallees;
 use crate::report::pysa::call_graph::HigherOrderParameter;
 use crate::report::pysa::call_graph::IdentifierCallees;
 use crate::report::pysa::call_graph::ImplicitReceiver;
@@ -45,7 +46,7 @@ use crate::report::pysa::function::FunctionRef;
 use crate::report::pysa::global_variable::GlobalVariableRef;
 use crate::report::pysa::module::ModuleIds;
 use crate::report::pysa::types::ScalarTypeProperties;
-use crate::test::pysa::utils::create_state;
+use crate::test::pysa::utils::create_state_with_files;
 use crate::test::pysa::utils::get_class_ref;
 use crate::test::pysa::utils::get_global_ref;
 use crate::test::pysa::utils::get_handle_for_module_name;
@@ -274,7 +275,21 @@ fn test_building_call_graph_for_module(
         Vec<(&'static str, ExpressionCallees<FunctionRefForTest>)>,
     )>,
 ) {
-    let state = create_state(test_module_name, code);
+    test_building_call_graph_for_module_with_files(test_module_name, code, &[], create_expected)
+}
+
+fn test_building_call_graph_for_module_with_files(
+    test_module_name: &str,
+    code: &str,
+    files: &[(&str, &str, &str)],
+    create_expected: &dyn Fn(
+        &ModuleContext,
+    ) -> Vec<(
+        &'static str,
+        Vec<(&'static str, ExpressionCallees<FunctionRefForTest>)>,
+    )>,
+) {
+    let state = create_state_with_files(test_module_name, code, files);
     let transaction = state.transaction();
     let handles = transaction.handles();
     let module_ids = ModuleIds::new(&handles);
@@ -423,6 +438,7 @@ fn attribute_access_callees(
         },
         property_setters,
         property_getters,
+        getattr_callees: GetattrCallees::empty(),
         global_targets: vec![],
         is_attribute,
     })
@@ -435,6 +451,7 @@ fn global_attribute_access_callees(
         if_called: CallCallees::empty(),
         property_setters: vec![],
         property_getters: vec![],
+        getattr_callees: GetattrCallees::empty(),
         global_targets,
         is_attribute: true,
     })
@@ -447,8 +464,25 @@ fn property_getter_callees(
         if_called: CallCallees::empty(),
         property_setters: vec![],
         property_getters,
+        getattr_callees: GetattrCallees::empty(),
         global_targets: vec![],
         is_attribute: false,
+    })
+}
+
+fn getattr_callees(
+    targets: Vec<PysaCallTarget<FunctionRefForTest>>,
+) -> ExpressionCallees<FunctionRefForTest> {
+    ExpressionCallees::AttributeAccess(AttributeAccessCallees {
+        if_called: CallCallees::empty(),
+        property_setters: vec![],
+        property_getters: vec![],
+        getattr_callees: GetattrCallees {
+            targets,
+            unresolved: Unresolved::False,
+        },
+        global_targets: vec![],
+        is_attribute: true,
     })
 }
 
@@ -459,6 +493,7 @@ fn property_setter_callees(
         if_called: CallCallees::empty(),
         property_setters,
         property_getters: vec![],
+        getattr_callees: GetattrCallees::empty(),
         global_targets: vec![],
         is_attribute: false,
     })
@@ -477,6 +512,7 @@ fn attribute_access_callable_callees(
         },
         property_setters: vec![],
         property_getters: vec![],
+        getattr_callees: GetattrCallees::empty(),
         global_targets: vec![],
         is_attribute: false,
     })
@@ -1427,6 +1463,7 @@ def foo(c_or_d: C | D, c_or_e: C | E):
                         if_called: CallCallees::empty(),
                         property_setters: vec![],
                         property_getters: property_getters_c_or_e,
+                        getattr_callees: GetattrCallees::empty(),
                         global_targets: vec![],
                         is_attribute: true,
                     }),
@@ -2527,6 +2564,7 @@ def foo(c: C) -> int:
                                 .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
                                 .with_receiver_class_for_test("test.C", context),
                         ],
+                        getattr_callees: GetattrCallees::empty(),
                         global_targets: vec![],
                         is_attribute: false,
                     }),
@@ -3122,7 +3160,19 @@ class CallViaGetattr:
 def baz(x: CallViaGetattr) -> None:
   y = x.attribute
 "#,
-    &|_context: &ModuleContext| { vec![("test.baz", vec![])] }
+    &|context: &ModuleContext| {
+        vec![(
+            "test.baz",
+            vec![(
+                "7:7-7:18",
+                getattr_callees(vec![
+                    create_call_target("test.CallViaGetattr.__getattr__", TargetType::Overrides)
+                        .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
+                        .with_receiver_class_for_test("test.CallViaGetattr", context),
+                ]),
+            )],
+        )]
+    }
 );
 
 call_graph_testcase!(
@@ -3140,7 +3190,6 @@ def baz(x: CallViaGetattr) -> None:
   y = x.attribute
 "#,
     &|context: &ModuleContext| {
-        // TODO(T244609756): Add the implicit calls to `__getattr__`
         let call_targets = vec![
             create_call_target("test.CallableClass.__call__", TargetType::Overrides)
                 .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
@@ -3151,16 +3200,30 @@ def baz(x: CallViaGetattr) -> None:
             "test.baz",
             vec![(
                 "10:7-10:18",
-                attribute_access_callees(
-                    call_targets,
-                    /* init_targets */ vec![],
-                    /* new_targets */ vec![],
-                    /* property_setters */ vec![],
-                    /* property_getters */ vec![],
-                    /* higher_order_parameters */ vec![],
-                    Unresolved::False,
-                    /* is_attribute */ false,
-                ),
+                ExpressionCallees::AttributeAccess(AttributeAccessCallees {
+                    if_called: CallCallees {
+                        call_targets,
+                        init_targets: vec![],
+                        new_targets: vec![],
+                        higher_order_parameters: HashMap::new(),
+                        unresolved: Unresolved::False,
+                    },
+                    property_setters: vec![],
+                    property_getters: vec![],
+                    getattr_callees: GetattrCallees {
+                        targets: vec![
+                            create_call_target(
+                                "test.CallViaGetattr.__getattr__",
+                                TargetType::Overrides,
+                            )
+                            .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
+                            .with_receiver_class_for_test("test.CallViaGetattr", context),
+                        ],
+                        unresolved: Unresolved::False,
+                    },
+                    global_targets: vec![],
+                    is_attribute: false,
+                }),
             )],
         )]
     }
@@ -3245,6 +3308,7 @@ def foo(obj: Token):
                         },
                         property_setters: vec![],
                         property_getters: vec![],
+                        getattr_callees: GetattrCallees::empty(),
                         global_targets: vec![],
                         is_attribute: true,
                     }),
@@ -7494,6 +7558,7 @@ def foo(x: PropertyCallable, y: PropertyCallableReturn):
                             .with_receiver_class_for_test("test.PropertyCallable", context),
                         ],
                         property_setters: vec![],
+                        getattr_callees: GetattrCallees::empty(),
                         global_targets: vec![],
                         is_attribute: false,
                     }),
@@ -7904,6 +7969,7 @@ def foo(data: str):
                         },
                         property_setters: vec![],
                         property_getters: vec![],
+                        getattr_callees: GetattrCallees::empty(),
                         global_targets: vec![get_global_ref(
                             "xml.etree.ElementTree",
                             "fromstring",
@@ -7951,6 +8017,7 @@ class A:
                         },
                         property_setters: vec![],
                         property_getters: vec![],
+                        getattr_callees: GetattrCallees::empty(),
                         global_targets: vec![],
                         is_attribute: true,
                     }),
@@ -8304,6 +8371,629 @@ def foo(c: C):
         vec![(
             "test.foo",
             vec![("11:5-11:11", property_getter_callees(property_getters))],
+        )]
+    }
+);
+
+call_graph_testcase!(
+    test_attribute_read_through_getattr,
+    TEST_MODULE_NAME,
+    r#"
+class Dynamic:
+  x: int
+  def __getattr__(self, name: str) -> int: ...
+def foo(d: Dynamic):
+  d.x
+  d.y
+  d.y = 1
+"#,
+    &|context: &ModuleContext| {
+        vec![(
+            "test.foo",
+            vec![(
+                "7:3-7:6",
+                getattr_callees(vec![
+                    create_call_target("test.Dynamic.__getattr__", TargetType::Overrides)
+                        .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
+                        .with_receiver_class_for_test("test.Dynamic", context)
+                        .with_return_type(ScalarTypeProperties::int()),
+                ]),
+            )],
+        )]
+    }
+);
+
+call_graph_testcase!(
+    test_attribute_read_through_getattribute,
+    TEST_MODULE_NAME,
+    r#"
+class Intercepting:
+  x: int
+  def __getattribute__(self, name: str) -> int: ...
+class Inheriting(Intercepting):
+  pass
+def foo(i: Intercepting, s: Inheriting):
+  i.x
+  i.y
+  s.x
+  s.y
+"#,
+    &|context: &ModuleContext| {
+        let getattribute_target = |receiver_class: &str| {
+            create_call_target("test.Intercepting.__getattribute__", TargetType::Overrides)
+                .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
+                .with_receiver_class_for_test(receiver_class, context)
+                .with_return_type(ScalarTypeProperties::int())
+        };
+        vec![(
+            "test.foo",
+            vec![
+                (
+                    "8:3-8:6",
+                    getattr_callees(vec![getattribute_target("test.Intercepting")]),
+                ),
+                (
+                    "9:3-9:6",
+                    getattr_callees(vec![getattribute_target("test.Intercepting")]),
+                ),
+                (
+                    "10:3-10:6",
+                    getattr_callees(vec![getattribute_target("test.Inheriting")]),
+                ),
+                (
+                    "11:3-11:6",
+                    getattr_callees(vec![getattribute_target("test.Inheriting")]),
+                ),
+            ],
+        )]
+    }
+);
+
+call_graph_testcase!(
+    test_attribute_read_through_getattr_or_getattribute_on_union,
+    TEST_MODULE_NAME,
+    r#"
+class Dynamic:
+  x: int
+  def __getattr__(self, name: str) -> int: ...
+class Intercepting:
+  x: int
+  def __getattribute__(self, name: str) -> int: ...
+def foo(u: Dynamic | Intercepting):
+  u.x
+  u.y
+"#,
+    &|context: &ModuleContext| {
+        let target = |method: &str, receiver_class: &str| {
+            create_call_target(method, TargetType::Overrides)
+                .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
+                .with_receiver_class_for_test(receiver_class, context)
+                .with_return_type(ScalarTypeProperties::int())
+        };
+        vec![(
+            "test.foo",
+            vec![
+                (
+                    "9:3-9:6",
+                    getattr_callees(vec![target(
+                        "test.Intercepting.__getattribute__",
+                        "test.Intercepting",
+                    )]),
+                ),
+                (
+                    "10:3-10:6",
+                    getattr_callees(vec![
+                        target("test.Dynamic.__getattr__", "test.Dynamic"),
+                        target("test.Intercepting.__getattribute__", "test.Intercepting"),
+                    ]),
+                ),
+            ],
+        )]
+    }
+);
+
+call_graph_testcase!(
+    test_attribute_read_through_inherited_or_overloaded_getattr,
+    TEST_MODULE_NAME,
+    r#"
+from typing import Literal, overload
+class Base:
+  def __getattr__(self, name: str) -> int: ...
+class Derived(Base):
+  pass
+class Overloaded:
+  @overload
+  def __getattr__(self, name: Literal["a"]) -> int: ...
+  @overload
+  def __getattr__(self, name: str) -> str: ...
+  def __getattr__(self, name: str) -> int | str: ...
+def foo(d: Derived, o: Overloaded):
+  d.y
+  o.y
+"#,
+    &|context: &ModuleContext| {
+        vec![(
+            "test.foo",
+            vec![
+                (
+                    "14:3-14:6",
+                    getattr_callees(vec![
+                        create_call_target("test.Base.__getattr__", TargetType::Overrides)
+                            .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
+                            .with_receiver_class_for_test("test.Derived", context)
+                            .with_return_type(ScalarTypeProperties::int()),
+                    ]),
+                ),
+                (
+                    "15:3-15:6",
+                    getattr_callees(vec![
+                        create_call_target("test.Overloaded.__getattr__", TargetType::Overrides)
+                            .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
+                            .with_receiver_class_for_test("test.Overloaded", context),
+                    ]),
+                ),
+            ],
+        )]
+    }
+);
+
+call_graph_testcase!(
+    test_attribute_read_through_metaclass_getattr_or_getattribute,
+    TEST_MODULE_NAME,
+    r#"
+class Meta(type):
+  def __getattr__(cls, name: str) -> int: ...
+class InterceptingMeta(type):
+  def __getattribute__(cls, name: str) -> int: ...
+class A(metaclass=Meta):
+  x: int = 0
+class B(metaclass=InterceptingMeta):
+  x: int = 0
+def foo(a: type[A], b: type[B]):
+  a.x
+  a.y
+  b.x
+"#,
+    &|context: &ModuleContext| {
+        let class_object = |class_name: &str| {
+            identifier_callees(
+                /* call_targets */ vec![],
+                /* init_targets */
+                vec![
+                    create_call_target("builtins.object.__init__", TargetType::Function)
+                        .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
+                        .with_receiver_class_for_test(class_name, context),
+                ],
+                /* new_targets */
+                vec![
+                    create_call_target("builtins.object.__new__", TargetType::Function)
+                        .with_is_static_method(true),
+                ],
+                /* higher_order_parameters */ vec![],
+                Unresolved::False,
+            )
+        };
+        // TODO: Resolve a method bound to a class object through its metaclass, here
+        // `test.Meta.__getattr__` and `test.InterceptingMeta.__getattribute__`.
+        let unresolved_getattr_callees = || {
+            ExpressionCallees::AttributeAccess(AttributeAccessCallees {
+                if_called: CallCallees::empty(),
+                property_setters: vec![],
+                property_getters: vec![],
+                getattr_callees: GetattrCallees {
+                    targets: vec![],
+                    unresolved: Unresolved::True(UnresolvedReason::UnexpectedDefiningClass),
+                },
+                global_targets: vec![],
+                is_attribute: true,
+            })
+        };
+        vec![(
+            "test.foo",
+            vec![
+                ("11:3-11:4|identifier|a", class_object("test.A")),
+                ("12:3-12:4|identifier|a", class_object("test.A")),
+                ("12:3-12:6", unresolved_getattr_callees()),
+                ("13:3-13:4|identifier|b", class_object("test.B")),
+                ("13:3-13:6", unresolved_getattr_callees()),
+            ],
+        )]
+    }
+);
+
+call_graph_testcase!(
+    test_attribute_read_through_module_getattr,
+    TEST_MODULE_NAME,
+    r#"
+import test
+def __getattr__(name: str) -> int: ...
+def __getattribute__(name: str) -> int: ...
+def foo():
+  test.y
+"#,
+    &|_context: &ModuleContext| {
+        vec![(
+            "test.foo",
+            vec![(
+                "6:3-6:9",
+                getattr_callees(vec![
+                    create_call_target("test.__getattr__", TargetType::Function)
+                        .with_return_type(ScalarTypeProperties::int()),
+                ]),
+            )],
+        )]
+    }
+);
+
+call_graph_testcase!(
+    test_attribute_read_through_stub_getattr_or_getattribute,
+    TEST_MODULE_NAME,
+    r#"
+import argparse
+import types
+def foo(n: argparse.Namespace, s: types.SimpleNamespace):
+  n.y
+  s.y
+"#,
+    &|context: &ModuleContext| {
+        // The hooks return `Any`, so what the read gives, if called, is unresolved.
+        let stub_getattr_callees = |method: &str, class_name: &str| {
+            ExpressionCallees::AttributeAccess(AttributeAccessCallees {
+                if_called: CallCallees::new_unresolved(UnresolvedReason::UnexpectedPyreflyTarget),
+                property_setters: vec![],
+                property_getters: vec![],
+                getattr_callees: GetattrCallees {
+                    targets: vec![
+                        create_call_target(method, TargetType::Overrides)
+                            .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
+                            .with_receiver_class_for_test(class_name, context),
+                    ],
+                    unresolved: Unresolved::False,
+                },
+                global_targets: vec![],
+                is_attribute: true,
+            })
+        };
+        vec![(
+            "test.foo",
+            vec![
+                (
+                    "5:3-5:6",
+                    stub_getattr_callees("argparse.Namespace.__getattr__", "argparse.Namespace"),
+                ),
+                (
+                    "6:3-6:6",
+                    stub_getattr_callees(
+                        "types.SimpleNamespace.__getattribute__",
+                        "types.SimpleNamespace",
+                    ),
+                ),
+            ],
+        )]
+    }
+);
+
+call_graph_testcase!(
+    test_attribute_read_through_any_getattr,
+    TEST_MODULE_NAME,
+    r#"
+from typing import Any
+class Dynamic:
+  __getattr__: Any
+def foo(d: Dynamic):
+  d.y
+"#,
+    &|_context: &ModuleContext| {
+        vec![(
+            "test.foo",
+            vec![(
+                "6:3-6:6",
+                ExpressionCallees::AttributeAccess(AttributeAccessCallees {
+                    if_called: CallCallees::new_unresolved(
+                        UnresolvedReason::UnexpectedPyreflyTarget,
+                    ),
+                    property_setters: vec![],
+                    property_getters: vec![],
+                    getattr_callees: GetattrCallees {
+                        targets: vec![],
+                        unresolved: Unresolved::True(UnresolvedReason::UnexpectedPyreflyTarget),
+                    },
+                    global_targets: vec![],
+                    is_attribute: true,
+                }),
+            )],
+        )]
+    }
+);
+
+call_graph_testcase!(
+    test_attribute_read_on_any_or_super,
+    TEST_MODULE_NAME,
+    r#"
+from typing import Any
+class Base:
+  def __getattr__(self, name: str) -> int: ...
+  def __getattribute__(self, name: str) -> int: ...
+class Derived(Base):
+  def foo(self, a: Any):
+    super().y
+    a.y
+"#,
+    &|context: &ModuleContext| {
+        vec![(
+            "test.Derived.foo",
+            vec![(
+                "8:5-8:12",
+                constructor_call_callees(
+                    vec![
+                        create_call_target("builtins.super.__init__", TargetType::Function)
+                            .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
+                            .with_receiver_class_for_test("builtins.super", context),
+                    ],
+                    vec![
+                        create_call_target("builtins.object.__new__", TargetType::Function)
+                            .with_is_static_method(true),
+                    ],
+                ),
+            )],
+        )]
+    }
+);
+
+call_graph_testcase!(
+    test_attribute_store_delete_and_augmented_assignment,
+    TEST_MODULE_NAME,
+    r#"
+class Dynamic:
+  def __getattr__(self, name: str) -> int: ...
+def foo(d: Dynamic):
+  d.y = 1
+  del d.y
+  d.y, d.z = 1, 2
+  for d.w in [1]:
+    pass
+  d.y += 1
+"#,
+    &|context: &ModuleContext| {
+        vec![(
+            "test.foo",
+            vec![
+                (
+                    "8:14-8:17|artificial-call|for-iter",
+                    regular_call_callees(vec![
+                        create_call_target("builtins.list.__iter__", TargetType::Overrides)
+                            .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
+                            .with_receiver_class_for_test("builtins.list", context),
+                    ]),
+                ),
+                (
+                    "8:14-8:17|artificial-call|for-next",
+                    regular_call_callees(vec![
+                        create_call_target("typing.Iterator.__next__", TargetType::Overrides)
+                            .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
+                            .with_receiver_class_for_test("typing.Iterator", context)
+                            .with_return_type(ScalarTypeProperties::int()),
+                    ]),
+                ),
+                (
+                    "10:3-10:6",
+                    getattr_callees(vec![
+                        create_call_target("test.Dynamic.__getattr__", TargetType::Overrides)
+                            .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
+                            .with_receiver_class_for_test("test.Dynamic", context)
+                            .with_return_type(ScalarTypeProperties::int()),
+                    ]),
+                ),
+                (
+                    "10:3-10:11|artificial-call|augmented-assign-dunder-call",
+                    regular_call_callees(vec![
+                        create_call_target("builtins.int.__add__", TargetType::Overrides)
+                            .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
+                            .with_receiver_class_for_test("builtins.int", context)
+                            .with_return_type(ScalarTypeProperties::int()),
+                    ]),
+                ),
+            ],
+        )]
+    }
+);
+
+call_graph_testcase!(
+    test_attribute_read_on_receiver_without_type_or_never,
+    TEST_MODULE_NAME,
+    r#"
+import sys
+from typing import Never
+class Dynamic:
+  def __getattr__(self, name: str) -> int: ...
+def foo(d: Dynamic, n: Never):
+  if sys.version_info < (3, 0):
+    d.y
+  n.y
+"#,
+    &|_context: &ModuleContext| {
+        vec![(
+            "test.foo",
+            vec![(
+                "7:6-7:31|artificial-call|comparison",
+                unresolved_expression_callees(
+                    UnresolvedReason::UnresolvedMagicDunderAttrDueToNoBase,
+                ),
+            )],
+        )]
+    }
+);
+
+call_graph_testcase!(
+    test_method_call_through_getattribute,
+    TEST_MODULE_NAME,
+    r#"
+class Intercepting:
+  def __getattribute__(self, name: str) -> object: ...
+  def m(self) -> None: ...
+def foo(i: Intercepting):
+  i.m()
+"#,
+    &|context: &ModuleContext| {
+        let m = vec![
+            create_call_target("test.Intercepting.m", TargetType::Overrides)
+                .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
+                .with_receiver_class_for_test("test.Intercepting", context),
+        ];
+        vec![(
+            "test.foo",
+            vec![
+                (
+                    "6:3-6:6",
+                    ExpressionCallees::AttributeAccess(AttributeAccessCallees {
+                        if_called: CallCallees {
+                            call_targets: m.clone(),
+                            init_targets: vec![],
+                            new_targets: vec![],
+                            higher_order_parameters: HashMap::new(),
+                            unresolved: Unresolved::False,
+                        },
+                        property_setters: vec![],
+                        property_getters: vec![],
+                        getattr_callees: GetattrCallees {
+                            targets: vec![
+                                create_call_target(
+                                    "test.Intercepting.__getattribute__",
+                                    TargetType::Overrides,
+                                )
+                                .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
+                                .with_receiver_class_for_test("test.Intercepting", context),
+                            ],
+                            unresolved: Unresolved::False,
+                        },
+                        global_targets: vec![],
+                        is_attribute: false,
+                    }),
+                ),
+                ("6:3-6:8", regular_call_callees(m)),
+            ],
+        )]
+    }
+);
+
+call_graph_testcase!(
+    test_getattr_call_through_getattr,
+    TEST_MODULE_NAME,
+    r#"
+class Dynamic:
+  def __getattr__(self, name: str) -> int: ...
+def foo(d: Dynamic):
+  getattr(d, "y", None)
+"#,
+    &|context: &ModuleContext| {
+        vec![(
+            "test.foo",
+            vec![
+                (
+                    "5:3-5:24",
+                    regular_call_callees(vec![
+                        create_call_target("builtins.getattr", TargetType::Function)
+                            .with_return_type(ScalarTypeProperties::int()),
+                    ]),
+                ),
+                (
+                    "5:3-5:24|artificial-attribute-access|get-attr-constant-literal",
+                    ExpressionCallees::AttributeAccess(AttributeAccessCallees {
+                        if_called: CallCallees::new_unresolved(
+                            UnresolvedReason::EmptyPyreflyCallTarget,
+                        ),
+                        property_setters: vec![],
+                        property_getters: vec![],
+                        getattr_callees: GetattrCallees {
+                            targets: vec![
+                                create_call_target(
+                                    "test.Dynamic.__getattr__",
+                                    TargetType::Overrides,
+                                )
+                                .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
+                                .with_receiver_class_for_test("test.Dynamic", context)
+                                .with_return_type(ScalarTypeProperties::int()),
+                            ],
+                            unresolved: Unresolved::False,
+                        },
+                        global_targets: vec![],
+                        is_attribute: true,
+                    }),
+                ),
+            ],
+        )]
+    }
+);
+
+#[test]
+fn test_attribute_read_through_getattr_of_project_stub() {
+    // Pyrefly reads a project's `lib.pyi` in place of the `lib.py` beside it.
+    test_building_call_graph_for_module_with_files(
+        TEST_MODULE_NAME,
+        r#"
+from lib import Dynamic
+def foo(d: Dynamic):
+  d.y
+"#,
+        &[(
+            "lib",
+            "lib.pyi",
+            "class Dynamic:\n  def __getattr__(self, name: str) -> int: ...\n",
+        )],
+        &|context: &ModuleContext| {
+            vec![(
+                "test.foo",
+                vec![(
+                    "4:3-4:6",
+                    getattr_callees(vec![
+                        create_call_target("lib.Dynamic.__getattr__", TargetType::Overrides)
+                            .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
+                            .with_receiver_class_for_test("lib.Dynamic", context)
+                            .with_return_type(ScalarTypeProperties::int()),
+                    ]),
+                )],
+            )]
+        },
+    );
+}
+
+call_graph_testcase!(
+    test_attribute_read_through_getattr_of_class_with_unknown_base,
+    TEST_MODULE_NAME,
+    r#"
+from missing import Base
+class Dynamic(Base):
+  x: int
+  def __getattr__(self, name: str) -> int: ...
+def foo(d: Dynamic):
+  d.x
+  d.y
+"#,
+    &|context: &ModuleContext| {
+        // `y` may be missing from the unknown base, so `__getattr__` may run.
+        vec![(
+            "test.foo",
+            vec![(
+                "8:3-8:6",
+                ExpressionCallees::AttributeAccess(AttributeAccessCallees {
+                    if_called: CallCallees::new_unresolved(
+                        UnresolvedReason::UnexpectedPyreflyTarget,
+                    ),
+                    property_setters: vec![],
+                    property_getters: vec![],
+                    getattr_callees: GetattrCallees {
+                        targets: vec![
+                            create_call_target("test.Dynamic.__getattr__", TargetType::Overrides)
+                                .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
+                                .with_receiver_class_for_test("test.Dynamic", context)
+                                .with_return_type(ScalarTypeProperties::int()),
+                        ],
+                        unresolved: Unresolved::False,
+                    },
+                    global_targets: vec![],
+                    is_attribute: true,
+                }),
+            )],
         )]
     }
 );

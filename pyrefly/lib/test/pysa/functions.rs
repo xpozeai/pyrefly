@@ -1889,3 +1889,69 @@ class B(A):
         ]
     },
 );
+
+exported_functions_testcase!(
+    test_export_decorator_through_module_getattr,
+    r#"
+import typing
+import test
+
+def __getattr__(name: str) -> typing.Callable[[int], int]:
+    raise AttributeError(name)
+
+@test.wrap
+def foo(x: int) -> int:
+    return x
+"#,
+    &|context: &ModuleContext| {
+        let heap = context.answers_context.answers.heap();
+        let callable_int_to_int = PysaType::from_type(
+            &heap.mk_callable_from(Callable::list(
+                ParamList::new(vec![Param::PosOnly(
+                    None,
+                    heap.mk_class_type(context.answers_context.stdlib.int().clone()),
+                    Required::Required,
+                )]),
+                heap.mk_class_type(context.answers_context.stdlib.int().clone()),
+            )),
+            context,
+        );
+        // The decorator's callees are what it calls, not the `__getattr__` that reading it runs.
+        vec![
+            create_function_definition(
+                "__getattr__",
+                ScopeParent::TopLevel,
+                /* overloads */
+                vec![create_simple_signature(
+                    vec![FunctionParameter::Pos {
+                        name: "name".into(),
+                        annotation: PysaType::from_class_type(
+                            context.answers_context.stdlib.str(),
+                            context,
+                        ),
+                        required: true,
+                    }],
+                    callable_int_to_int,
+                )],
+            )
+            .with_name_location(Some(create_location(5, 5, 5, 16))),
+            create_function_definition(
+                "foo",
+                ScopeParent::TopLevel,
+                /* overloads */
+                vec![create_simple_signature(
+                    vec![FunctionParameter::Pos {
+                        name: "x".into(),
+                        annotation: PysaType::from_class_type(
+                            context.answers_context.stdlib.int(),
+                            context,
+                        ),
+                        required: true,
+                    }],
+                    PysaType::from_class_type(context.answers_context.stdlib.int(), context),
+                )],
+            )
+            .with_name_location(Some(create_location(9, 5, 9, 8))),
+        ]
+    },
+);

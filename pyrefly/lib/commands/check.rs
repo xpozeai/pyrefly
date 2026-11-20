@@ -110,6 +110,7 @@ use crate::error::suppress::UnusedIgnoreKind;
 use crate::module::typeshed::typeshed;
 use crate::module::typeshed_third_party::typeshed_third_party;
 use crate::report;
+use crate::report::pysa::type_of_expression::ExportedExpressions;
 use crate::state::load::FileContents;
 use crate::state::require::Require;
 use crate::state::require::RequireLevels;
@@ -354,6 +355,11 @@ struct OutputArgs {
     /// Format for pysa report output (json or capnp)
     #[arg(long, value_enum, default_value_t = report::pysa::PysaFormat::Capnp)]
     report_pysa_format: report::pysa::PysaFormat,
+    /// In the pysa report, export the type of every expression with a type trace, not only
+    /// the names, attribute bases, and call arguments Pysa needs. Some expressions in a
+    /// lambda's body have no type trace.
+    #[arg(long, requires = "report_pysa")]
+    report_pysa_all_expression_types: bool,
     /// Report the cross-module demand tree (aggregated summary of LookupAnswer
     /// and LookupExport calls). Useful for analyzing laziness properties.
     #[arg(long, value_name = "OUTPUT_FILE")]
@@ -528,6 +534,7 @@ impl OutputArgs {
             report_scip_project_version,
             report_pysa,
             report_pysa_format,
+            report_pysa_all_expression_types,
             report_demand_tree,
             report_cinderx,
             cinderx_include_readable,
@@ -576,6 +583,7 @@ impl OutputArgs {
             || report_scip_project_version.is_some()
             || report_pysa.is_some()
             || !matches!(report_pysa_format, report::pysa::PysaFormat::Capnp)
+            || *report_pysa_all_expression_types
             || report_demand_tree.is_some()
             || report_cinderx.is_some()
             || *cinderx_include_readable
@@ -2152,6 +2160,11 @@ impl CheckArgs {
                 pysa_directory,
                 handles,
                 self.output.report_pysa_format,
+                if self.output.report_pysa_all_expression_types {
+                    ExportedExpressions::All
+                } else {
+                    ExportedExpressions::PysaNeeds
+                },
             )?;
             transaction.set_pysa_reporter(Some(reporter));
         }

@@ -26,6 +26,16 @@ use crate::report::pysa::function::FunctionId;
 use crate::report::pysa::location::PysaLocation;
 use crate::report::pysa::types::PysaType;
 
+/// Which expressions to export the type of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportedExpressions {
+    /// Only those Pysa needs: names, attribute bases, and call arguments.
+    PysaNeeds,
+    /// Every expression with a type trace, for consumers that need the type of any operand.
+    /// Some expressions in a lambda's body have none, such as `x + 1` in `lambda x: x + 1`.
+    All,
+}
+
 /// Builder for constructing per-function type data with deduplication.
 struct FunctionTypeOfExpressionsBuilder {
     type_table: Vec<PysaType>,
@@ -72,6 +82,7 @@ impl FunctionTypeOfExpressionsBuilder {
 
 struct TypeOfExpressionVisitor<'a> {
     module_context: &'a ModuleContext<'a>,
+    expressions: ExportedExpressions,
     current_function: Option<FunctionId>,
     result: HashMap<FunctionId, FunctionTypeOfExpressionsBuilder>,
 }
@@ -127,10 +138,12 @@ impl AstScopedVisitor for TypeOfExpressionVisitor<'_> {
         }
     }
 
-    /// We only export types for expressions that Pysa needs:
+    /// By default we only export types for expressions that Pysa needs:
     /// - `Expr::Name`: simple variable references (e.g. `x`)
     /// - `Expr::Attribute`: the base of an attribute access (e.g. type of `x` in `x.foo`)
     /// - `Expr::Call`: each positional and keyword argument
+    ///
+    /// With `ExportedExpressions::All`, we export the type of every expression with a type trace.
     fn visit_expression(
         &mut self,
         expr: &Expr,
@@ -138,6 +151,10 @@ impl AstScopedVisitor for TypeOfExpressionVisitor<'_> {
         _parent_expression: Option<&Expr>,
         _current_statement: Option<&ruff_python_ast::Stmt>,
     ) {
+        if self.expressions == ExportedExpressions::All {
+            self.maybe_export_type(expr);
+            return;
+        }
         match expr {
             Expr::Name(_) => self.maybe_export_type(expr),
             Expr::Attribute(ExprAttribute { value, .. }) => self.maybe_export_type(value),
@@ -160,9 +177,11 @@ impl AstScopedVisitor for TypeOfExpressionVisitor<'_> {
 
 pub fn export_type_of_expressions(
     context: &ModuleContext,
+    expressions: ExportedExpressions,
 ) -> HashMap<FunctionId, FunctionTypeOfExpressions> {
     let mut visitor = TypeOfExpressionVisitor {
         module_context: context,
+        expressions,
         current_function: None,
         result: HashMap::new(),
     };

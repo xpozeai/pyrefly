@@ -39,6 +39,7 @@ use ruff_python_ast::Expr;
 use ruff_python_ast::ExprBinOp;
 use ruff_python_ast::ExprCall;
 use ruff_python_ast::ExprCompare;
+use ruff_python_ast::ExprContext;
 use ruff_python_ast::ExprFString;
 use ruff_python_ast::ExprName;
 use ruff_python_ast::ExprSlice;
@@ -749,6 +750,9 @@ pub struct AttributeAccessCallees<Function: FunctionTrait> {
     pub property_setters: Vec<PysaCallTarget<Function>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub property_getters: Vec<PysaCallTarget<Function>>,
+    /// The `__getattribute__` and `__getattr__` methods that run when the attribute is read.
+    #[serde(skip_serializing_if = "GetattrCallees::is_empty")]
+    pub getattr_callees: GetattrCallees<Function>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub global_targets: Vec<GlobalVariableRef>,
     /// True if that there is at least one case (i.e., execution flow) where this is a regular
@@ -776,6 +780,7 @@ impl<Function: FunctionTrait> AttributeAccessCallees<Function> {
             if_called: self.if_called.map_function(map),
             property_setters: map_call_targets(self.property_setters),
             property_getters: map_call_targets(self.property_getters),
+            getattr_callees: self.getattr_callees.map_function(map),
             global_targets: self.global_targets,
             is_attribute: self.is_attribute,
         }
@@ -785,9 +790,12 @@ impl<Function: FunctionTrait> AttributeAccessCallees<Function> {
         self.if_called.is_empty()
             && self.property_setters.is_empty()
             && self.property_getters.is_empty()
+            && self.getattr_callees.is_empty()
             && self.global_targets.is_empty()
     }
 
+    /// Leaves out `getattr_callees`: this serves decorator callees, which are what a decorator
+    /// calls, not the `__getattribute__` or `__getattr__` that reading its expression runs.
     pub fn all_targets(&self) -> impl Iterator<Item = &PysaCallTarget<Function>> {
         self.if_called
             .all_targets()
@@ -801,6 +809,7 @@ impl<Function: FunctionTrait> AttributeAccessCallees<Function> {
         self.property_setters.dedup();
         self.property_getters.sort();
         self.property_getters.dedup();
+        self.getattr_callees.dedup_and_sort();
         self.global_targets.sort();
         self.global_targets.dedup();
     }
@@ -809,9 +818,10 @@ impl<Function: FunctionTrait> AttributeAccessCallees<Function> {
         self.if_called.strip_unresolved_if_called();
     }
 
-    fn has_globals_or_properties(&self) -> bool {
+    fn has_callees_besides_if_called(&self) -> bool {
         !self.property_getters.is_empty()
             || !self.property_setters.is_empty()
+            || !self.getattr_callees.is_empty()
             || !self.global_targets.is_empty()
     }
 }
@@ -940,6 +950,51 @@ impl<Function: FunctionTrait> FormatStringArtificialCallees<Function> {
 
     pub fn all_targets(&self) -> impl Iterator<Item = &PysaCallTarget<Function>> {
         self.targets.iter()
+    }
+
+    fn dedup_and_sort(&mut self) {
+        self.targets.sort();
+        self.targets.dedup();
+    }
+}
+
+/// The `__getattribute__` and `__getattr__` methods that run when an attribute is read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GetattrCallees<Function: FunctionTrait> {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<PysaCallTarget<Function>>,
+    #[serde(skip_serializing_if = "Unresolved::is_resolved")]
+    pub unresolved: Unresolved,
+}
+
+impl<Function: FunctionTrait> GetattrCallees<Function> {
+    pub fn empty() -> Self {
+        GetattrCallees {
+            targets: vec![],
+            unresolved: Unresolved::False,
+        }
+    }
+
+    #[cfg(test)]
+    fn map_function<OutputFunction: FunctionTrait, MapFunction>(
+        self,
+        map: &MapFunction,
+    ) -> GetattrCallees<OutputFunction>
+    where
+        MapFunction: Fn(Function) -> OutputFunction,
+    {
+        GetattrCallees {
+            targets: self
+                .targets
+                .into_iter()
+                .map(|call_target| PysaCallTarget::map_function(call_target, map))
+                .collect(),
+            unresolved: self.unresolved,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.targets.is_empty() && self.unresolved.is_resolved()
     }
 
     fn dedup_and_sort(&mut self) {
@@ -2669,6 +2724,7 @@ impl<'a> CallGraphVisitor<'a> {
         callee_range: TextRange,
         return_type: ScalarTypeProperties,
         assignment_targets: Option<&[Expr]>,
+        is_read: bool,
     ) -> AttributeAccessCallees<FunctionRef> {
         // Always try to resolve callees using go-to definitions first.
         // The main reason is that it automatically ignores decorators, which is
@@ -2847,6 +2903,65 @@ impl<'a> CallGraphVisitor<'a> {
                 unresolved: Unresolved::False,
             }
         };
+        // Reading an attribute runs the `__getattribute__` and `__getattr__` methods that the data
+        // model calls for it.
+        let getattr_callees = if let Some(receiver_type) = receiver_type.as_ref()
+            && is_read
+        {
+            self.module_context
+                .resolver
+                .with_solver("call_graph_attribute_access_methods", |solver| {
+                    solver
+                        .attribute_access_methods(
+                            receiver_type,
+                            attribute,
+                            callee_range,
+                            &self.error_collector,
+                        )
+                        .into_iter()
+                        .map(|method| {
+                            method.map(|method| (solver.as_call_target(method.clone()), method))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .map_or(
+                    GetattrCallees {
+                        targets: vec![],
+                        unresolved: Unresolved::True(UnresolvedReason::UnresolvedMagicDunderAttr),
+                    },
+                    |methods| {
+                        let mut callees = GetattrCallees::empty();
+                        for method in methods {
+                            let (targets, unresolved) = match method {
+                                Ok((target, method)) => {
+                                    let resolved = self.resolve_pyrefly_target(
+                                        Some(target),
+                                        callee_expr,
+                                        Some(&method),
+                                        self.get_return_type_for_callee(Some(&method)),
+                                        /* callee_expr_suffix */ None,
+                                        /* unknown_callee_as_direct_call */ true,
+                                        /* exclude_object_methods */ false,
+                                    );
+                                    (
+                                        resolved.all_targets().cloned().collect(),
+                                        resolved.unresolved,
+                                    )
+                                }
+                                Err(_) => (
+                                    vec![],
+                                    Unresolved::True(UnresolvedReason::UnresolvedMagicDunderAttr),
+                                ),
+                            };
+                            callees.targets.extend(targets);
+                            callees.unresolved = callees.unresolved.join(unresolved);
+                        }
+                        callees
+                    },
+                )
+        } else {
+            GetattrCallees::empty()
+        };
         AttributeAccessCallees {
             // Don't treat attributes that are functions (those are usually methods) as "regular"
             // attributes so we don't propagate taint from the base to the attribute.
@@ -2895,6 +3010,7 @@ impl<'a> CallGraphVisitor<'a> {
                     })
                     .collect::<Vec<_>>()
             },
+            getattr_callees,
             global_targets,
         }
     }
@@ -3067,6 +3183,7 @@ impl<'a> CallGraphVisitor<'a> {
                     attribute.range(),
                     return_type,
                     assignment_targets,
+                    /* is_read */ true,
                 );
                 debug_println!(
                     self.debug,
@@ -3123,6 +3240,7 @@ impl<'a> CallGraphVisitor<'a> {
             call.range(),
             return_type,
             assignment_targets,
+            /* is_read */ true,
         ));
         let expression_identifier = ExpressionIdentifier::ArtificialAttributeAccess(Origin {
             kind: OriginKind::GetAttrConstantLiteral,
@@ -3215,7 +3333,7 @@ impl<'a> CallGraphVisitor<'a> {
                 )
             }
             (ResolveCallCallees::AttributeAccess(callees), Expr::Attribute(attribute))
-                if callees.has_globals_or_properties() =>
+                if callees.has_callees_besides_if_called() =>
             {
                 self.add_callees(
                     ExpressionIdentifier::regular(
@@ -3977,6 +4095,16 @@ impl<'a> CallGraphVisitor<'a> {
                     /* return_type */
                     self.get_return_type_for_callee(expr_type().as_ref()), // This is the return type when `expr` is called
                     assignment_targets(current_statement),
+                    /* is_read */
+                    match attribute.ctx {
+                        ExprContext::Load => true,
+                        // An augmented assignment reads its target before it writes it.
+                        ExprContext::Store => matches!(
+                            current_statement,
+                            Some(Stmt::AugAssign(assign)) if assign.target.range() == attribute.range()
+                        ),
+                        ExprContext::Del | ExprContext::Invalid => false,
+                    },
                 );
                 callees.strip_unresolved_if_called();
                 debug_println!(

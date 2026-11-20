@@ -5,6 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::collections::BTreeMap;
+
 use dupe::Dupe;
 use pretty_assertions::assert_eq;
 use pyrefly_python::module_name::ModuleName;
@@ -12,6 +14,7 @@ use pyrefly_types::callable::Callable;
 use pyrefly_types::callable::ParamList;
 use pyrefly_types::class::ClassType;
 use pyrefly_types::lit_int::LitInt;
+use pyrefly_types::module::ModuleType;
 use pyrefly_types::quantified::AnchorIndex;
 use pyrefly_types::quantified::Quantified;
 use pyrefly_types::quantified::QuantifiedAnchor;
@@ -24,6 +27,7 @@ use pyrefly_types::type_var::PreInferenceVariance;
 use pyrefly_types::type_var::Restriction;
 use pyrefly_types::typed_dict::AnonymousTypedDictInner;
 use pyrefly_types::typed_dict::TypedDictField;
+use pyrefly_types::types::AnyStyle;
 use pyrefly_types::types::Type;
 use ruff_python_ast::name::Name;
 
@@ -32,7 +36,10 @@ use crate::report::pysa::context::ModuleAnswersContext;
 use crate::report::pysa::context::ModuleContext;
 use crate::report::pysa::context::PysaResolver;
 use crate::report::pysa::module::ModuleIds;
+use crate::report::pysa::type_of_expression::ExportedExpressions;
+use crate::report::pysa::type_of_expression::export_type_of_expressions;
 use crate::report::pysa::types::ClassNamesFromType;
+use crate::report::pysa::types::PysaAnyStyle;
 use crate::report::pysa::types::PysaType;
 use crate::report::pysa::types::TypeModifier;
 use crate::test::pysa::utils::create_state;
@@ -154,7 +161,8 @@ class MyTypedDict(TypedDict):
     );
 
     assert_eq!(
-        PysaType::new("Unknown".to_owned(), ClassNamesFromType::not_a_class()),
+        PysaType::new("Unknown".to_owned(), ClassNamesFromType::not_a_class())
+            .with_any_style(PysaAnyStyle::Implicit),
         PysaType::from_type(
             &context.answers_context.answers.heap().mk_any_implicit(),
             &context
@@ -162,9 +170,36 @@ class MyTypedDict(TypedDict):
     );
 
     assert_eq!(
-        PysaType::new("typing.Any".to_owned(), ClassNamesFromType::not_a_class()),
+        PysaType::new("typing.Any".to_owned(), ClassNamesFromType::not_a_class())
+            .with_any_style(PysaAnyStyle::Explicit),
         PysaType::from_type(
             &context.answers_context.answers.heap().mk_any_explicit(),
+            &context
+        ),
+    );
+
+    assert_eq!(
+        PysaType::new("Unknown".to_owned(), ClassNamesFromType::not_a_class())
+            .with_any_style(PysaAnyStyle::MissingImport),
+        PysaType::from_type(
+            &context
+                .answers_context
+                .answers
+                .heap()
+                .mk_any(AnyStyle::MissingImport),
+            &context
+        ),
+    );
+
+    assert_eq!(
+        PysaType::new(
+            "Module[os.path]".to_owned(),
+            ClassNamesFromType::not_a_class()
+        )
+        .with_module("os.path"),
+        PysaType::from_type(
+            &ModuleType::new_as(ModuleName::from_str("os.path"))
+                .to_type(context.answers_context.answers.heap()),
             &context
         ),
     );
@@ -778,6 +813,63 @@ class MyTypedDict(TypedDict):
                     )],
                 }),
             &context,
+        ),
+    );
+}
+
+/// The exported type of each location the type of which Pysa needs, over every function.
+fn type_of_expressions(python_code: &str) -> BTreeMap<String, PysaType> {
+    let state = create_state("test", python_code);
+    let transaction = state.transaction();
+    let handles = transaction.handles();
+    let module_ids = ModuleIds::new(&handles);
+    let handle = get_handle_for_module_name("test", &transaction);
+    let resolver = PysaResolver::new_for_test(&transaction, &module_ids, handle.dupe(), &handles);
+    let context = ModuleContext {
+        answers_context: ModuleAnswersContext::create(handle.dupe(), &transaction, &module_ids),
+        resolver: &resolver,
+    };
+    export_type_of_expressions(&context, ExportedExpressions::PysaNeeds)
+        .into_values()
+        .flat_map(|function| {
+            function
+                .locations
+                .into_iter()
+                .map(|(location, id)| {
+                    (
+                        location.as_key(),
+                        function.type_table[id.0 as usize].clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+#[test]
+fn test_pysa_type_of_module_and_missing_import() {
+    let module = |name: &str| {
+        PysaType::new(format!("Module[{name}]"), ClassNamesFromType::not_a_class())
+            .with_module(name)
+    };
+    assert_eq!(
+        BTreeMap::from([
+            ("5:5-5:7".to_owned(), module("os")),
+            ("5:5-5:12".to_owned(), module("os.path")),
+            (
+                "6:5-6:6".to_owned(),
+                PysaType::new("Unknown".to_owned(), ClassNamesFromType::not_a_class())
+                    .with_any_style(PysaAnyStyle::MissingImport)
+            ),
+        ]),
+        type_of_expressions(
+            r#"
+import os.path
+from missing import m
+def f():
+    os.path.x
+    m.x
+"#
         ),
     );
 }

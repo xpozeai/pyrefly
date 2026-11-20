@@ -857,6 +857,79 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         false
     }
 
+    /// The `__getattribute__` and `__getattr__` methods that reading the attribute runs: on each
+    /// union branch, the type's own `__getattribute__` (not `object`'s), and its `__getattr__`
+    /// where static lookup does not find the attribute. Unlike `apply_getattr_fallback`, which
+    /// types the read, this states what the read calls.
+    pub(crate) fn attribute_access_methods(
+        &self,
+        base: &Type,
+        attr_name: &Name,
+        range: TextRange,
+        errors: &ErrorCollector,
+    ) -> Vec<Result<Type, NoAccessReason>> {
+        let Some(attr_base) = self.as_attribute_base(base.clone()) else {
+            return Vec::new();
+        };
+        let mut methods = Vec::new();
+        for base1 in attr_base.0 {
+            match base1 {
+                // `Any` and `Never` have no known methods; reads through `super()` run
+                // `super.__getattribute__`.
+                AttributeBase1::Any(_)
+                | AttributeBase1::Never
+                | AttributeBase1::TypeAny(_)
+                | AttributeBase1::TypeNever
+                | AttributeBase1::SuperInstance(..) => continue,
+                // A module's own `__getattribute__` is never called (PEP 562).
+                AttributeBase1::Module(_) => {}
+                _ => methods.extend(
+                    self.lookup_magic_dunder_attr(
+                        base1.clone().to_attr_base(),
+                        &dunder::GETATTRIBUTE,
+                    )
+                    .found,
+                ),
+            }
+            let (found, not_found, _) = self
+                .lookup_attr_static(base1.to_attr_base(), attr_name)
+                .decompose();
+            for not_found in not_found {
+                methods.extend(
+                    self.lookup_magic_dunder_attr(
+                        not_found.attr_base1().to_attr_base(),
+                        &dunder::GETATTR,
+                    )
+                    .found,
+                );
+            }
+            // A class with an unknown base types an attribute it does not declare as `Any`; the
+            // attribute may be missing, so the `__getattr__` the class declares may run.
+            for (_, on) in found.into_iter().filter(|(attr, on)| {
+                matches!(attr, Attribute::Simple(Type::Any(_)))
+                    && match on {
+                        AttributeBase1::ClassInstance(cls)
+                        | AttributeBase1::SelfType(cls)
+                        | AttributeBase1::EnumLiteral(LitEnum { class: cls, .. }) => self
+                            .get_metadata_for_class(cls.class_object())
+                            .has_base_any(),
+                        _ => false,
+                    }
+            }) {
+                methods.extend(
+                    self.lookup_magic_dunder_attr(on.to_attr_base(), &dunder::GETATTR)
+                        .found
+                        .into_iter()
+                        .filter(|(attr, _)| matches!(attr, Attribute::ClassAttribute(_))),
+                );
+            }
+        }
+        methods
+            .into_iter()
+            .map(|(attr, _)| self.resolve_get_access(attr_name, attr, range, errors, None))
+            .collect()
+    }
+
     /// Compute the narrowed attribute type for `hasattr` narrowing.
     /// Returns `None` if the attribute exists on all union members (no narrowing needed).
     /// Otherwise returns `Some(ty)` where `ty` is the union of attribute types from

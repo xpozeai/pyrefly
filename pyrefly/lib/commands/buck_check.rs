@@ -38,6 +38,7 @@ use crate::error::error::Error;
 use crate::error::legacy::LegacyError;
 use crate::error::legacy::LegacyErrors;
 use crate::report;
+use crate::report::pysa::type_of_expression::ExportedExpressions;
 use crate::state::require::Require;
 use crate::state::state::State;
 use crate::state::subscriber::ProgressBarStyle;
@@ -196,6 +197,7 @@ fn compute_errors(
             pysa_directory,
             &modules_to_check,
             options.report_pysa_format,
+            ExportedExpressions::PysaNeeds,
         )?;
         transaction.as_mut().set_pysa_reporter(Some(reporter));
     }

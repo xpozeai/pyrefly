@@ -17,6 +17,7 @@ use pyrefly_types::quantified::Quantified;
 use pyrefly_types::type_alias::TypeAliasData;
 use pyrefly_types::type_var::Restriction;
 use pyrefly_types::type_var::ShapeExtensionRestriction;
+use pyrefly_types::types::AnyStyle;
 use pyrefly_types::types::Type;
 use serde::Serialize;
 
@@ -35,6 +36,30 @@ pub enum TypeModifier {
     TypeVariableBound,      // TypeVar(.., bound=T)
     TypeVariableConstraint, // TypeVar("T", ..., ...)
     Type,                   // type[T]
+}
+
+/// How a type came to be `Any`.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PysaAnyStyle {
+    // The user wrote `Any`.
+    Explicit,
+    // The user didn't write a type, so it was inferred as `Any`.
+    Implicit,
+    // There was an error, so `Any` was made up.
+    Error,
+    // An import could not be resolved.
+    MissingImport,
+}
+
+impl From<AnyStyle> for PysaAnyStyle {
+    fn from(style: AnyStyle) -> PysaAnyStyle {
+        match style {
+            AnyStyle::Explicit => PysaAnyStyle::Explicit,
+            AnyStyle::Implicit => PysaAnyStyle::Implicit,
+            AnyStyle::Error => PysaAnyStyle::Error,
+            AnyStyle::MissingImport => PysaAnyStyle::MissingImport,
+        }
+    }
 }
 
 /// A class reference along with the modifiers that were stripped to extract it.
@@ -75,6 +100,15 @@ pub struct PysaType {
 
     #[serde(skip_serializing_if = "ClassNamesFromType::skip_serializing")]
     pub class_names: ClassNamesFromType,
+
+    // How the type came to be `Any`. Set only when the whole type is `Any`, not for a type
+    // that contains `Any`, such as `list[Any]` or `int | Any`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub any_style: Option<PysaAnyStyle>,
+
+    // The name of the module, if the type is a module.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
 }
 
 impl ClassNamesFromType {
@@ -364,6 +398,8 @@ impl PysaType {
                 is_enum: false,
             },
             class_names,
+            any_style: None,
+            module: None,
         }
     }
 
@@ -391,6 +427,18 @@ impl PysaType {
         self
     }
 
+    #[cfg(test)]
+    pub fn with_any_style(mut self, any_style: PysaAnyStyle) -> PysaType {
+        self.any_style = Some(any_style);
+        self
+    }
+
+    #[cfg(test)]
+    pub fn with_module(mut self, module: &str) -> PysaType {
+        self.module = Some(module.to_owned());
+        self
+    }
+
     pub fn from_type(type_: &Type, context: &ModuleContext) -> PysaType {
         let type_ = preprocess_type(type_, &context.answers_context);
         let string = string_for_type(context.resolver.type_env(), &type_);
@@ -399,6 +447,14 @@ impl PysaType {
             string,
             scalar_type_properties: ScalarTypeProperties::from_preprocessed_type(&type_, context),
             class_names: get_classes_of_type(&type_, context),
+            any_style: match &type_ {
+                Type::Any(style) => Some((*style).into()),
+                _ => None,
+            },
+            module: match &type_ {
+                Type::Module(module) => Some(module.to_string()),
+                _ => None,
+            },
         }
     }
 
@@ -421,6 +477,8 @@ impl PysaType {
             string: "Unknown".to_owned(),
             scalar_type_properties: ScalarTypeProperties::none(),
             class_names: ClassNamesFromType::not_a_class(),
+            any_style: Some(PysaAnyStyle::Implicit),
+            module: None,
         }
     }
 
@@ -430,6 +488,8 @@ impl PysaType {
             string: "None".to_owned(),
             scalar_type_properties: ScalarTypeProperties::none(),
             class_names: ClassNamesFromType::not_a_class(),
+            any_style: None,
+            module: None,
         }
     }
 }

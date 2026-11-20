@@ -50,6 +50,7 @@ use crate::report::pysa::location::PysaLocation;
 use crate::report::pysa::scope::ScopeParent;
 use crate::report::pysa::types::ClassNamesFromType;
 use crate::report::pysa::types::ClassWithModifiers;
+use crate::report::pysa::types::PysaAnyStyle;
 use crate::report::pysa::types::PysaType;
 use crate::report::pysa::types::ScalarTypeProperties;
 use crate::report::pysa::types::TypeModifier;
@@ -140,12 +141,28 @@ fn set_class_names(
     builder.set_is_exhaustive(class_names.is_exhaustive);
 }
 
+fn convert_any_style(any_style: Option<PysaAnyStyle>) -> pysa_report_capnp::AnyStyle {
+    match any_style {
+        None => pysa_report_capnp::AnyStyle::None,
+        Some(PysaAnyStyle::Explicit) => pysa_report_capnp::AnyStyle::Explicit,
+        Some(PysaAnyStyle::Implicit) => pysa_report_capnp::AnyStyle::Implicit,
+        Some(PysaAnyStyle::Error) => pysa_report_capnp::AnyStyle::Error,
+        Some(PysaAnyStyle::MissingImport) => pysa_report_capnp::AnyStyle::MissingImport,
+    }
+}
+
 fn set_pysa_type(mut builder: pysa_report_capnp::pysa_type::Builder, ty: &PysaType) {
     builder.reborrow().set_string(&ty.string);
     set_scalar_type_properties(
         builder.reborrow().init_scalar_type_properties(),
         ty.scalar_type_properties,
     );
+    builder
+        .reborrow()
+        .set_any_style(convert_any_style(ty.any_style));
+    if let Some(module) = &ty.module {
+        builder.reborrow().set_module(module);
+    }
     if !ty.class_names.classes.is_empty() {
         set_class_names(builder.init_class_names(), &ty.class_names);
     }
@@ -505,6 +522,19 @@ fn set_attribute_access_callees(
         for (i, call_target) in attribute_access.property_getters.iter().enumerate() {
             set_pysa_call_target(targets.reborrow().get(i as u32), call_target);
         }
+    }
+    if !attribute_access.getattr_callees.is_empty() {
+        let mut getattr_callees = builder.reborrow().init_getattr_callees();
+        let mut targets = getattr_callees
+            .reborrow()
+            .init_targets(attribute_access.getattr_callees.targets.len() as u32);
+        for (i, call_target) in attribute_access.getattr_callees.targets.iter().enumerate() {
+            set_pysa_call_target(targets.reborrow().get(i as u32), call_target);
+        }
+        set_unresolved(
+            getattr_callees.init_unresolved(),
+            &attribute_access.getattr_callees.unresolved,
+        );
     }
     {
         let mut targets = builder
